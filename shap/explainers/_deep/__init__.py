@@ -19,7 +19,7 @@ class Deep(Explainer):
     See :ref:`Deep Explainer Examples <deep_explainer_examples>`
     """
 
-    def __init__(self, model, data, session=None, learning_phase_flags=None):
+    def __init__(self, model, data, session=None, learning_phase_flags=None, grad_batch_size=None):
         """ An explainer object for a differentiable model using a given background dataset.
 
         Note that the complexity of the method scales linearly with the number of background data
@@ -64,6 +64,10 @@ class Deep(Explainer):
             batch norm or dropout. If None is passed then we look for tensors in the graph that look like
             learning phase flags (this works for Keras models). Note that we assume all the flags should
             have a value of False during predictions (and hence explanations).
+
+
+        grad_batch_size : None or int > 0
+            Size of the minibatch for computing gradients incrementally over all the background samples.
         """
         # first, we need to find the framework
         if type(model) is tuple:
@@ -83,11 +87,11 @@ class Deep(Explainer):
         if framework == 'tensorflow':
             self.explainer = TFDeep(model, data, session, learning_phase_flags)
         elif framework == 'pytorch':
-            self.explainer = PyTorchDeep(model, data)
+            self.explainer = PyTorchDeep(model, data, grad_batch_size=grad_batch_size)
 
         self.expected_value = self.explainer.expected_value
 
-    def shap_values(self, X, ranked_outputs=None, output_rank_order='max', check_additivity=True):
+    def shap_values(self, X, ranked_outputs=None, output_idx=None, output_rank_order='max', check_additivity=True):
         """ Return approximate SHAP values for the model applied to the data given by X.
 
         Parameters
@@ -121,4 +125,4 @@ class Deep(Explainer):
             ranked_outputs, and indexes is a matrix that indicates for each sample which output indexes
             were chosen as "top".
         """
-        return self.explainer.shap_values(X, ranked_outputs, output_rank_order, check_additivity=check_additivity)
+        return self.explainer.shap_values(X, ranked_outputs, output_idx, output_rank_order, check_additivity=check_additivity)
