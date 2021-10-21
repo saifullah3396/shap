@@ -1,7 +1,17 @@
-import numpy as np
 import warnings
-from .._explainer import Explainer
+from typing import Optional
+
+import numpy as np
+import torch
+import torch.nn as nn
 from packaging import version
+from torch._jit_internal import BroadcastingList2, BroadcastingList3
+from torch.nn.functional import (_unpool_output_size, handle_torch_function,
+                                 has_torch_function_unary)
+from torch.nn.modules.utils import _pair
+
+from .._explainer import Explainer
+
 torch = None
 
 
@@ -221,15 +231,15 @@ class PyTorchDeep(Explainer):
             phis = []
             if self.interim:
                 for k in range(len(self.interim_inputs_shape)):
-                    phis.append(np.zeros((X[0].shape[0], ) + self.interim_inputs_shape[k][1: ]))
+                    phis.append(np.zeros((X[0].shape[0], ) + self.interim_inputs_shape[k][1:]))
             else:
                 for k in range(len(X)):
                     phis.append(np.zeros(X[k].shape))
             for j in range(X[0].shape[0]):
                 # tile the inputs to line up with the background data samples
                 tiled_X = [X[l][j:j + 1].repeat(
-                                   (self.data[l].shape[0],) + tuple([1 for k in range(len(X[l].shape) - 1)])) for l
-                           in range(len(X))]
+                    (self.data[l].shape[0],) + tuple([1 for k in range(len(X[l].shape) - 1)])) for l
+                    in range(len(X))]
                 joint_x = [torch.cat((tiled_X[l], self.data[l]), dim=0) for l in range(len(X))]
                 # run attribution computation graph
                 feature_ind = model_output_ranks[j, i]
@@ -249,7 +259,8 @@ class PyTorchDeep(Explainer):
                         phis[l][j] = (sample_phis[l][self.data[l].shape[0]:] * (x[l] - data[l])).mean(0)
                 else:
                     for l in range(len(X)):
-                        phis[l][j] = (torch.from_numpy(sample_phis[l][self.data[l].shape[0]:]).to(self.device) * (X[l][j: j + 1] - self.data[l])).cpu().detach().numpy().mean(0)
+                        phis[l][j] = (torch.from_numpy(sample_phis[l][self.data[l].shape[0]:]).to(
+                            self.device) * (X[l][j: j + 1] - self.data[l])).cpu().detach().numpy().mean(0)
             output_phis.append(phis[0] if not self.multi_input else phis)
         # cleanup; remove all gradient handles
         for handle in handles:
@@ -257,6 +268,44 @@ class PyTorchDeep(Explainer):
         self.remove_attributes(self.model)
         if self.interim:
             self.target_handle.remove()
+
+        # check that the SHAP values sum up to the model output
+        if check_additivity:
+            with torch.no_grad():
+                model_output = self.model(*X).cpu().numpy()
+            if ranked_outputs is not None:
+
+                for l in range(len(output_phis)):
+                    if not self.multi_input:
+                        output_idx = model_output_ranks[:, l].item()
+                        diffs = \
+                            model_output[:, output_idx] - \
+                            self.expected_value[output_idx] - \
+                            output_phis[l].sum(axis=tuple(range(1, output_phis[l].ndim)))
+                    else:
+                        diffs = model_output[:, l] - self.expected_value[l]
+                        for i in range(len(output_phis[l])):
+                            diffs -= output_phis[l][i].sum(axis=tuple(range(1, output_phis[l][i].ndim)))
+                    assert np.abs(diffs).max() < 1e-2, "The SHAP explanations do not sum up to the model's output! This is either because of a " \
+                                                       "rounding error or because an operator in your computation graph was not fully supported. If " \
+                                                       "the sum difference of %f is significant compared the scale of your model outputs please post " \
+                                                       "as a github issue, with a reproducable example if possible so we can debug it." % np.abs(
+                                                           diffs).max()
+            else:
+                for l in range(len(self.expected_value)):
+                    if not self.multi_input:
+                        diffs = model_output[:, l] - self.expected_value[l] - \
+                            output_phis[l].sum(axis=tuple(range(1, output_phis[l].ndim)))
+                        print(diffs, model_output[:, l], output_phis[l].sum(axis=tuple(range(1, output_phis[l].ndim))))
+                    else:
+                        diffs = model_output[:, l] - self.expected_value[l]
+                        for i in range(len(output_phis[l])):
+                            diffs -= output_phis[l][i].sum(axis=tuple(range(1, output_phis[l][i].ndim)))
+                    assert np.abs(diffs).max() < 1e-2, "The SHAP explanations do not sum up to the model's output! This is either because of a " \
+                                                       "rounding error or because an operator in your computation graph was not fully supported. If " \
+                                                       "the sum difference of %f is significant compared the scale of your model outputs please post " \
+                                                       "as a github issue, with a reproducable example if possible so we can debug it." % np.abs(
+                                                           diffs).max()
 
         if not self.multi_output:
             return output_phis[0]
@@ -314,7 +363,7 @@ def add_interim_values(module, input, output):
                         setattr(module, 'x', torch.nn.Parameter(input[0].detach()))
                 else:
                     if hasattr(module, 'x'):
-                        x = getattr(module, 'x')    
+                        x = getattr(module, 'x')
                         if not isinstance(x, torch.nn.ParameterList):
                             x = torch.nn.ParameterList([x])
                         x.append(torch.nn.Parameter(input.detach()))
@@ -324,7 +373,7 @@ def add_interim_values(module, input, output):
                         setattr(module, 'x', torch.nn.Parameter(input.detach()))
                 if type(output) is tuple:
                     if hasattr(module, 'y'):
-                        y = getattr(module, 'y')    
+                        y = getattr(module, 'y')
                         if not isinstance(y, torch.nn.ParameterList):
                             y = torch.nn.ParameterList([y])
                         y.append(torch.nn.Parameter(output[0].detach()))
@@ -334,7 +383,7 @@ def add_interim_values(module, input, output):
                         setattr(module, 'y', torch.nn.Parameter(output[0].detach()))
                 else:
                     if hasattr(module, 'y'):
-                        y = getattr(module, 'y')   
+                        y = getattr(module, 'y')
                         if not isinstance(y, torch.nn.ParameterList):
                             y = torch.nn.ParameterList([y])
                         y.append(torch.nn.Parameter(output.detach()))
@@ -381,10 +430,54 @@ def passthrough(module, grad_input, grad_output):
     return None
 
 
+def max_unpool2d(
+    input, indices,
+    kernel_size: BroadcastingList2[int],
+    stride: Optional[BroadcastingList2[int]] = None,
+    padding: BroadcastingList2[int] = 0,
+    output_size: Optional[BroadcastingList2[int]] = None
+):
+    r"""Computes a partial inverse of :class:`MaxPool2d`.
+
+    See :class:`~torch.nn.MaxUnpool2d` for details.
+    """
+    if has_torch_function_unary(input):
+        return handle_torch_function(
+            max_unpool2d,
+            (input,),
+            input,
+            indices,
+            kernel_size,
+            stride=stride,
+            padding=padding,
+            output_size=output_size,
+        )
+    kernel_size = _pair(kernel_size)
+    if stride is not None:
+        _stride = _pair(stride)
+    else:
+        _stride = kernel_size
+    padding = _pair(padding)
+    output_size = _unpool_output_size(input, kernel_size, _stride, padding, output_size)
+    batch_size, num_ch, h_in, w_in = input.shape
+    input_size_flat = h_in * w_in
+    output_size_flat = output_size[0] * output_size[1]
+    unpooled = torch.zeros(batch_size * num_ch * output_size_flat, device=input.get_device())
+    flat_input = input.flatten()
+    flat_indices = indices.flatten()
+    offsets = torch.arange(batch_size * num_ch, device=input.get_device()
+                           ).repeat_interleave(input_size_flat) * output_size_flat
+    flat_indices += offsets
+    unpooled = unpooled.index_add(0, flat_indices, flat_input)
+    unpooled = unpooled.view(batch_size, num_ch, *output_size)
+
+    return unpooled
+
+
 def maxpool(module, grad_input, grad_output):
     if isinstance(module.y, torch.nn.ParameterList):
         if hasattr(module, 'last_layer_idx'):
-            layer_idx = getattr(module, 'last_layer_idx')-1 
+            layer_idx = getattr(module, 'last_layer_idx')-1
             setattr(module, 'last_layer_idx', layer_idx)
         else:
             layer_idx = len(module.x)-1
@@ -405,7 +498,8 @@ def maxpool(module, grad_input, grad_output):
 
     pool_to_unpool = {
         'MaxPool1d': torch.nn.functional.max_unpool1d,
-        'MaxPool2d': torch.nn.functional.max_unpool2d,
+        # 'MaxPool2d': torch.nn.functional.max_unpool2d,
+        'MaxPool2d': max_unpool2d,
         'MaxPool3d': torch.nn.functional.max_unpool3d
     }
     pool_to_function = {
@@ -425,19 +519,21 @@ def maxpool(module, grad_input, grad_output):
         _, indices = pool_to_function[module.__class__.__name__](
             module_x, module.kernel_size, module.stride, module.padding,
             module.dilation, module.ceil_mode, True)
+
         xmax_pos, rmax_pos = torch.chunk(pool_to_unpool[module.__class__.__name__](
             grad_output[0] * diffs, indices, module.kernel_size, module.stride,
             module.padding, list(module_x.shape)), 2)
     org_input_shape = grad_input[0].shape  # for the maxpool 1d
-    grad_input = [None for _ in grad_input]
-    grad_input[0] = torch.where(torch.abs(delta_in) < 1e-7, torch.zeros_like(delta_in),
-                           (xmax_pos + rmax_pos) / delta_in).repeat(dup0)
+    grads = [None for _ in grad_input]
+    grads[0] = torch.where(torch.abs(delta_in.repeat(dup0)) < 1e-7, grad_input[0],
+                           ((xmax_pos + rmax_pos) / delta_in).repeat(dup0))
+
     if module.__class__.__name__ == 'MaxPool1d':
-        complex_module_gradients.append(grad_input[0])
+        complex_module_gradients.append(grads[0])
         # the grad input that is returned doesn't matter, since it will immediately be
         # be overridden by the grad in the complex_module_gradient
-        grad_input[0] = torch.ones(org_input_shape)
-    return tuple(grad_input)
+        grads[0] = torch.ones(org_input_shape)
+    return tuple(grads)
 
 
 def linear_1d(module, grad_input, grad_output):
@@ -448,7 +544,7 @@ def linear_1d(module, grad_input, grad_output):
 def nonlinear_1d(module, grad_input, grad_output):
     if isinstance(module.y, torch.nn.ParameterList):
         if hasattr(module, 'last_layer_idx'):
-            layer_idx = getattr(module, 'last_layer_idx')-1 
+            layer_idx = getattr(module, 'last_layer_idx')-1
             setattr(module, 'last_layer_idx', layer_idx)
         else:
             layer_idx = len(module.x)-1
