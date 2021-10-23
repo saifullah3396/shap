@@ -148,7 +148,7 @@ class PyTorchDeep(Explainer):
                 grads.append(grad)
             return grads
 
-    def batch_gradient(self, idx, inputs):
+    def batch_gradient(self, idx, inputs, background):
         self.model.zero_grad()
         X = [x.requires_grad_() for x in inputs]
         grads = []
@@ -157,17 +157,16 @@ class PyTorchDeep(Explainer):
             interim_inputs = self.layer.target_input
         for input_idx, x in enumerate(X):
             x = X[input_idx]
-            n_samples = x.shape[0] // 2
+            n_samples = len(background[input_idx])
             batch_indices = [i for i in range(0, n_samples+1, self.grad_batch_size)]
             if n_samples % self.grad_batch_size > 0:
                 batch_indices.append(batch_indices[-1]+n_samples % self.grad_batch_size)
-
             grads_targets = []
             grads_background = []
             for i in range(1, len(batch_indices)):
-                targets = x[batch_indices[i-1]:batch_indices[i], :]
-                background = x[n_samples+batch_indices[i-1]:n_samples+batch_indices[i]]
-                batched_x = torch.cat([targets, background])
+                batch_size = batch_indices[i] - batch_indices[i-1]
+                background_batch = background[input_idx][batch_indices[i-1]:batch_indices[i]]
+                batched_x = torch.cat([x.repeat(batch_size, 1, 1, 1), background_batch])
                 outputs = self.model(batched_x)
                 selected = [val for val in outputs[:, idx]]
                 if self.interim:
@@ -183,8 +182,8 @@ class PyTorchDeep(Explainer):
 
                 if grad is None:
                     grad = torch.zeros_like(x)
-                grads_targets.append(grad[:len(targets)].detach().cpu().numpy())
-                grads_background.append(grad[len(targets):].detach().cpu().numpy())
+                grads_targets.append(grad[:batch_size].detach().cpu().numpy())
+                grads_background.append(grad[batch_size:].detach().cpu().numpy())
             grads_background = np.concatenate(grads_background)
             grads_samples = np.concatenate(grads_targets)
             grads.append(np.concatenate([grads_samples, grads_background]))
@@ -246,14 +245,15 @@ class PyTorchDeep(Explainer):
                     phis.append(np.zeros(X[k].shape))
             for j in range(X[0].shape[0]):
                 # tile the inputs to line up with the background data samples
-                tiled_X = [X[l][j:j + 1].repeat(
-                    (self.data[l].shape[0],) + tuple([1 for k in range(len(X[l].shape) - 1)])) for l
-                    in range(len(X))]
-                joint_x = [torch.cat((tiled_X[l], self.data[l]), dim=0) for l in range(len(X))]
+                # tiled_X = [X[l][j:j + 1].repeat(
+                #     (self.data[l].shape[0],) + tuple([1 for k in range(len(X[l].shape) - 1)])) for l
+                #     in range(len(X))]
+                # joint_x = [torch.cat(([X[l][j:j + 1], self.data[l]), dim=0) for l in range(len(X))]
                 # run attribution computation graph
                 feature_ind = model_output_ranks[j, i]
                 if self.grad_batch_size is not None:
-                    sample_phis = self.batch_gradient(feature_ind, joint_x)
+                    sample_phis = self.batch_gradient(
+                        feature_ind, [X[l][j:j + 1] for l in range(len(X))], self.data)
                 else:
                     sample_phis = self.gradient(feature_ind, joint_x)
                 # assign the attributions to the right part of the output arrays
@@ -305,7 +305,6 @@ class PyTorchDeep(Explainer):
                     if not self.multi_input:
                         diffs = model_output[:, l] - self.expected_value[l] - \
                             output_phis[l].sum(axis=tuple(range(1, output_phis[l].ndim)))
-                        print(diffs, model_output[:, l], output_phis[l].sum(axis=tuple(range(1, output_phis[l].ndim))))
                     else:
                         diffs = model_output[:, l] - self.expected_value[l]
                         for i in range(len(output_phis[l])):
@@ -445,6 +444,8 @@ def max_unpool2d(
     stride: Optional[BroadcastingList2[int]] = None,
     padding: BroadcastingList2[int] = 0,
     output_size: Optional[BroadcastingList2[int]] = None
+
+
 ):
     r"""Computes a partial inverse of :class:`MaxPool2d`.
 
@@ -613,6 +614,7 @@ op_handler['LeakyReLU'] = nonlinear_1d
 op_handler['ReLU'] = nonlinear_1d
 op_handler['ELU'] = nonlinear_1d
 op_handler['Sigmoid'] = nonlinear_1d
+op_handler['MemoryEfficientSwish'] = nonlinear_1d
 op_handler["Tanh"] = nonlinear_1d
 op_handler["Softplus"] = nonlinear_1d
 op_handler['Softmax'] = nonlinear_1d
