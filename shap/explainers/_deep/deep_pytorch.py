@@ -62,7 +62,16 @@ class PyTorchDeep(Explainer):
         self.multi_output = False
         self.num_outputs = 1
         with torch.no_grad():
-            outputs = model(*data)
+            n_samples = data[0].shape[0]
+            batch_indices = [i for i in range(0, n_samples+1, self.grad_batch_size)]
+            if n_samples % self.grad_batch_size > 0:
+                batch_indices.append(batch_indices[-1]+n_samples % self.grad_batch_size)
+
+            outputs = []
+            for i in range(1, len(batch_indices)):
+                targets = [x[batch_indices[i-1]:batch_indices[i], :] for x in data]
+                outputs.append(self.model(*targets))
+            outputs = torch.cat(outputs)
 
             # also get the device everything is running on
             self.device = outputs.device
